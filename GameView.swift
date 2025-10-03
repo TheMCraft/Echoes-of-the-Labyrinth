@@ -3,7 +3,7 @@ import SpriteKit
 import CoreHaptics
 
 // MARK: - SpriteKit Scene
-final class SwipeScene: SKScene {
+final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
 
     // MARK: Nodes & World
     private let worldNode = SKNode()
@@ -16,15 +16,29 @@ final class SwipeScene: SKScene {
         CGRect(x: -worldSide/2, y: -worldSide/2, width: worldSide, height: worldSide)
     }
 
+    // MARK: Walls (immer bis zum Rand)
+    private var walls: [CGRect] {
+        let thickness: CGFloat = 40
+        return [
+            // vertikal, von oben bis unten
+            CGRect(x: -150, y: -worldSide/2, width: thickness, height: worldSide),
+            CGRect(x: 200,  y: -worldSide/2, width: thickness, height: worldSide),
+
+            // horizontal, von links bis rechts
+            CGRect(x: -worldSide/2, y: -100, width: worldSide, height: thickness),
+            CGRect(x: -worldSide/2, y: 300,  width: worldSide, height: thickness)
+        ]
+    }
+
     // MARK: Haptics & Input
     private var haptics: CHHapticEngine?
     private var touchStart: CGPoint?
 
     // MARK: Tuning
     private let swipeMinDistance: CGFloat = 20
-    private let moveSpeed: CGFloat = 5000
+    private let moveSpeed: CGFloat = 10
     private let edgeInset: CGFloat = 24
-    private let cameraZoom: CGFloat = 0.75 // kleiner als 1 => Kamera zoomt rein
+    private let cameraZoom: CGFloat = 1 // kleiner als 1 => Kamera zoomt rein
 
     private enum Dir {
         case up, down, left, right
@@ -35,7 +49,11 @@ final class SwipeScene: SKScene {
         backgroundColor = .black
         addChild(worldNode)
 
+        physicsWorld.gravity = .zero
+        physicsWorld.contactDelegate = self
+
         setupWorld()
+        setupWalls()
         setupArrow()
         setupCamera()
         setupHaptics()
@@ -55,8 +73,151 @@ final class SwipeScene: SKScene {
         border.strokeColor = .darkGray
         border.fillColor = .clear
         border.zPosition = -10
+
+        // physik für welt-rand
+        border.physicsBody = SKPhysicsBody(edgeLoopFrom: CGRect(
+            x: -worldSide/2, y: -worldSide/2,
+            width: worldSide, height: worldSide
+        ))
+        border.physicsBody?.categoryBitMask = 0x1 << 1
+        border.physicsBody?.isDynamic = false
+
         worldNode.addChild(border)
     }
+
+    private func setupWalls() {
+        // --- Parameter ---
+        let thickness: CGFloat = 24            // Wandstärke (muss > 0)
+        let cols = 14                          // Spalten (Zellen)
+        let rows = 10                          // Zeilen (Zellen)
+        let inset = worldSide * 0.15           // Abstand vom Weltrand
+
+        // --- Maze-Rect innerhalb der Welt ---
+        let mazeRect = worldRect.insetBy(dx: inset, dy: inset)
+        let cell = min( (mazeRect.width / CGFloat(cols)).rounded(.down),
+                        (mazeRect.height / CGFloat(rows)).rounded(.down) )
+        let mazeW = cell * CGFloat(cols)
+        let mazeH = cell * CGFloat(rows)
+        let origin = CGPoint(x: mazeRect.midX - mazeW/2, y: mazeRect.midY - mazeH/2)
+
+        // Helfer zum Hinzufügen einer Wand
+        func addWall(center: CGPoint, size: CGSize) {
+            let wall = SKShapeNode(rectOf: size, cornerRadius: 2)
+            wall.position = center
+            wall.fillColor = .gray
+            wall.strokeColor = .white
+            wall.lineWidth = 1.5
+            wall.zPosition = -5
+            wall.physicsBody = SKPhysicsBody(rectangleOf: size)
+            wall.physicsBody?.isDynamic = false
+            wall.physicsBody?.categoryBitMask = 0x1 << 2
+            wall.physicsBody?.collisionBitMask = 0x1 << 0
+            worldNode.addChild(wall)
+        }
+
+        // Zellstruktur mit vier möglichen Wänden
+        struct Cell {
+            var top = true, right = true, bottom = true, left = true
+            var visited = false
+        }
+
+        // Grid initialisieren
+        var grid = Array(repeating: Array(repeating: Cell(), count: cols), count: rows)
+
+        // DFS-Backtracker zum "Schnitzen"
+        func carveMaze(from start: (r: Int, c: Int)) {
+            var stack: [(r: Int, c: Int)] = [start]
+            grid[start.r][start.c].visited = true
+
+            while let current = stack.last {
+                var neighbors: [(r: Int, c: Int, dir: String)] = []
+                let r = current.r, c = current.c
+
+                // Nachbarn sammeln
+                if r+1 < rows && !grid[r+1][c].visited { neighbors.append((r+1, c, "up")) }
+                if c+1 < cols && !grid[r][c+1].visited { neighbors.append((r, c+1, "right")) }
+                if r-1 >= 0   && !grid[r-1][c].visited { neighbors.append((r-1, c, "down")) }
+                if c-1 >= 0   && !grid[r][c-1].visited { neighbors.append((r, c-1, "left")) }
+
+                if neighbors.isEmpty {
+                    _ = stack.popLast()
+                    continue
+                }
+
+                let next = neighbors.randomElement()!
+
+                // Wände zwischen current und next entfernen
+                switch next.dir {
+                case "up":
+                    grid[r][c].top = false
+                    grid[next.r][next.c].bottom = false
+                case "right":
+                    grid[r][c].right = false
+                    grid[next.r][next.c].left = false
+                case "down":
+                    grid[r][c].bottom = false
+                    grid[next.r][next.c].top = false
+                case "left":
+                    grid[r][c].left = false
+                    grid[next.r][next.c].right = false
+                default: break
+                }
+
+                grid[next.r][next.c].visited = true
+                stack.append((next.r, next.c))
+            }
+        }
+
+        // Maze schnitzen; Start unten links
+        carveMaze(from: (r: 0, c: 0))
+
+        // Eintritt/Austritt öffnen
+        let entranceCol = 0             // unten (row 0)
+        grid[0][entranceCol].bottom = false
+        let exitCol = cols - 1          // oben (row rows-1)
+        grid[rows-1][exitCol].top = false
+
+        // --- Wände zeichnen ---
+        // Konvention: Wir zeichnen pro Zelle die "bottom" und "right" Wand.
+        // Zusätzlich zeichnen wir für die oberste Reihe die "top"-Wände
+        // und für die linkeste Spalte die "left"-Wände. So gibt es keine Duplikate.
+
+        for r in 0..<rows {
+            for c in 0..<cols {
+                let cellMinX = origin.x + CGFloat(c) * cell
+                let cellMinY = origin.y + CGFloat(r) * cell
+                let centerX  = cellMinX + cell/2
+                let centerY  = cellMinY + cell/2
+
+                // bottom
+                if grid[r][c].bottom {
+                    let y = cellMinY
+                    addWall(center: CGPoint(x: centerX, y: y),
+                            size: CGSize(width: cell, height: thickness))
+                }
+                // right
+                if grid[r][c].right {
+                    let x = cellMinX + cell
+                    addWall(center: CGPoint(x: x, y: centerY),
+                            size: CGSize(width: thickness, height: cell))
+                }
+                // top nur in oberster Reihe
+                if r == rows - 1 && grid[r][c].top {
+                    let y = cellMinY + cell
+                    addWall(center: CGPoint(x: centerX, y: y),
+                            size: CGSize(width: cell, height: thickness))
+                }
+                // left nur in linker Spalte
+                if c == 0 && grid[r][c].left {
+                    let x = cellMinX
+                    addWall(center: CGPoint(x: x, y: centerY),
+                            size: CGSize(width: thickness, height: cell))
+                }
+            }
+        }
+    }
+
+
 
     // MARK: - Arrow
     private func setupArrow() {
@@ -65,6 +226,15 @@ final class SwipeScene: SKScene {
         arrow.strokeColor = .clear
         arrow.position = .zero
         arrow.zPosition = 10
+
+        arrow.physicsBody = SKPhysicsBody(polygonFrom: arrow.path!)
+        arrow.physicsBody?.isDynamic = true
+        arrow.physicsBody?.affectedByGravity = false
+        arrow.physicsBody?.allowsRotation = false
+        arrow.physicsBody?.categoryBitMask = 0x1 << 0
+        arrow.physicsBody?.collisionBitMask = 0xFFFFFFFF
+        arrow.physicsBody?.contactTestBitMask = 0xFFFFFFFF
+
         worldNode.addChild(arrow)
     }
 
@@ -149,35 +319,32 @@ final class SwipeScene: SKScene {
     // MARK: - Movement
     private func moveArrow(direction: Dir) {
         arrow.removeAllActions()
-        let current = arrow.position
-        var target = current
 
-        let minX = worldRect.minX + edgeInset
-        let maxX = worldRect.maxX - edgeInset
-        let minY = worldRect.minY + edgeInset
-        let maxY = worldRect.maxY - edgeInset
+        // Bewegung per Impuls
+        let impulse: CGVector
+        let force: CGFloat = 60
 
         switch direction {
-        case .up:    target = CGPoint(x: current.x, y: maxY)
-        case .down:  target = CGPoint(x: current.x, y: minY)
-        case .right: target = CGPoint(x: maxX, y: current.y)
-        case .left:  target = CGPoint(x: minX, y: current.y)
+        case .up:    impulse = CGVector(dx: 0, dy: force)
+        case .down:  impulse = CGVector(dx: 0, dy: -force)
+        case .right: impulse = CGVector(dx: force, dy: 0)
+        case .left:  impulse = CGVector(dx: -force, dy: 0)
         }
 
-        let distance = hypot(target.x - current.x, target.y - current.y)
-        let duration = distance / moveSpeed
-
-        let move = SKAction.move(to: target, duration: max(0.0001, duration))
-        move.timingMode = .easeOut
+        arrow.physicsBody?.velocity = .zero
+        arrow.physicsBody?.applyImpulse(impulse)
 
         let pulse = SKAction.sequence([
             SKAction.scale(to: 1.15, duration: 0.08),
             SKAction.scale(to: 1.0,  duration: 0.10)
         ])
+        arrow.run(pulse)
+    }
 
-        arrow.run(move) { [weak self] in
-            self?.hapticImpact()
-            self?.arrow.run(pulse)
+    // MARK: - Physics Contact
+    func didBegin(_ contact: SKPhysicsContact) {
+        if contact.bodyA.node == arrow || contact.bodyB.node == arrow {
+            arrow.physicsBody?.velocity = .zero
         }
     }
 
