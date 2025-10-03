@@ -316,26 +316,40 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         }
     }
 
-    // MARK: - Movement
     private func moveArrow(direction: Dir) {
         arrow.removeAllActions()
 
-        // Bewegung per Impuls
         let impulse: CGVector
-        let force: CGFloat = 60
+        let force: CGFloat = 150
 
+        // Rotation in Radiant
+        let angle: CGFloat
         switch direction {
-        case .up:    impulse = CGVector(dx: 0, dy: force)
-        case .down:  impulse = CGVector(dx: 0, dy: -force)
-        case .right: impulse = CGVector(dx: force, dy: 0)
-        case .left:  impulse = CGVector(dx: -force, dy: 0)
+        case .up:
+            impulse = CGVector(dx: 0, dy: force)
+            angle = .pi/2
+        case .down:
+            impulse = CGVector(dx: 0, dy: -force)
+            angle = -.pi/2
+        case .right:
+            impulse = CGVector(dx: force, dy: 0)
+            angle = 0
+        case .left:
+            impulse = CGVector(dx: -force, dy: 0)
+            angle = .pi
         }
 
         arrow.physicsBody?.velocity = .zero
         arrow.physicsBody?.applyImpulse(impulse)
 
+        // Drehung animiert
+        let rotate = SKAction.rotate(toAngle: angle, duration: 0.1, shortestUnitArc: true)
+
         let pulse = SKAction.sequence([
-            SKAction.scale(to: 1.15, duration: 0.08),
+            SKAction.group([
+                rotate,
+                SKAction.scale(to: 1.15, duration: 0.08)
+            ]),
             SKAction.scale(to: 1.0,  duration: 0.10)
         ])
         arrow.run(pulse)
@@ -345,8 +359,10 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     func didBegin(_ contact: SKPhysicsContact) {
         if contact.bodyA.node == arrow || contact.bodyB.node == arrow {
             arrow.physicsBody?.velocity = .zero
+            hapticImpact()
         }
     }
+
 
     // MARK: - Haptics
     private func setupHaptics() {
