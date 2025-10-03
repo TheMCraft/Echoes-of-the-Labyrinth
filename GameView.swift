@@ -10,13 +10,17 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     private let arrow = SKShapeNode()
     private var cam: SKCameraNode!
 
-    // Welt: Quadrat, Mittelpunkt = (0,0)
+    // Sichtfeld
+    private let cropNode = SKCropNode()
+    private let maskNode = SKShapeNode(circleOfRadius: 180)
+
+    // Welt
     private var worldSide: CGFloat = 0
     private var worldRect: CGRect {
         CGRect(x: -worldSide/2, y: -worldSide/2, width: worldSide, height: worldSide)
     }
 
-    // MARK: Grid / Maze
+    // Grid / Maze
     private struct Cell {
         var top = true, right = true, bottom = true, left = true
         var visited = false
@@ -25,31 +29,38 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     private var rows = 10
     private var grid: [[Cell]] = []
     private var cellSize: CGFloat = 0
-    private var mazeOrigin: CGPoint = .zero  // linke-untere Ecke des Maze-Rechtecks (in Weltkoordinaten)
+    private var mazeOrigin: CGPoint = .zero
 
-    // Aktuelle Spielerzelle (r: Zeile, c: Spalte) — r=0 ist unten, wächst nach oben
     private var playerRC: (r: Int, c: Int) = (0, 0)
 
-    // MARK: Haptics & Input
+    // Speichere Outline-Knoten
+    private var wallOutlines: [SKShapeNode] = []
+
+    // Haptics & Input
     private var haptics: CHHapticEngine?
     private var touchStart: CGPoint?
 
-    // MARK: Tuning
+    // Tuning
     private let swipeMinDistance: CGFloat = 20
-    private let cameraZoom: CGFloat = 1       // <1 = reinzoomen
+    private let cameraZoom: CGFloat = 1
     private let moveDuration: TimeInterval = 0.12
 
     private enum Dir { case up, down, left, right }
 
     // MARK: - Lifecycle
     override func didMove(to view: SKView) {
-        backgroundColor = .black
-        addChild(worldNode)
+        addChild(cropNode)
+        cropNode.addChild(worldNode)
+
+        maskNode.fillColor = .white
+        maskNode.strokeColor = .clear
+        cropNode.maskNode = maskNode
 
         physicsWorld.gravity = .zero
         physicsWorld.contactDelegate = self
 
         setupWorld()
+        addBackground()            // <-- nach setupWorld
         buildMazeAndWalls()
         setupArrowAtStart()
         setupCamera()
@@ -57,19 +68,30 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         updateCameraConstraints()
     }
 
+
     override func didChangeSize(_ oldSize: CGSize) {
         updateCameraConstraints()
     }
 
+    override func update(_ currentTime: TimeInterval) {
+        maskNode.position = arrow.position
+    }
+
+    // MARK: - Hintergrund
+    private func addBackground() {
+        let bg = SKSpriteNode(imageNamed: "floor") // Bild in Assets hinzufügen
+        bg.size = worldRect.size
+        bg.position = CGPoint(x: 0, y: 0)
+        bg.zPosition = -100
+        worldNode.addChild(bg)   // <- statt addChild(self), ins worldNode
+    }
+
+
     // MARK: - World
     private func setupWorld() {
-        worldSide = max(size.width, size.height) * 4.0  // Weltgröße hier skalieren
+        worldSide = max(size.width, size.height) * 4.0
 
-        let border = SKShapeNode(rectOf: CGSize(width: worldSide, height: worldSide))
-        border.lineWidth = 6
-        border.strokeColor = .darkGray
-        border.fillColor = .clear
-        border.zPosition = -10
+        let border = SKNode()
         border.physicsBody = SKPhysicsBody(edgeLoopFrom: CGRect(
             x: -worldSide/2, y: -worldSide/2, width: worldSide, height: worldSide
         ))
@@ -78,13 +100,11 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         worldNode.addChild(border)
     }
 
-    // MARK: - Maze (Grid + Wände)
+    // MARK: - Maze
     private func buildMazeAndWalls() {
-        // --- Parameter ---
-        let thickness: CGFloat = 24            // Wandstärke
-        let inset = worldSide * 0.15           // Abstand Maze zu Weltrand
+        let thickness: CGFloat = 24
+        let inset = worldSide * 0.15
 
-        // --- Maze-Rect innerhalb der Welt ---
         let mazeRect = worldRect.insetBy(dx: inset, dy: inset)
         cellSize = min(
             (mazeRect.width / CGFloat(cols)).rounded(.down),
@@ -94,10 +114,8 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         let mazeH = cellSize * CGFloat(rows)
         mazeOrigin = CGPoint(x: mazeRect.midX - mazeW/2, y: mazeRect.midY - mazeH/2)
 
-        // Grid initialisieren
         grid = Array(repeating: Array(repeating: Cell(), count: cols), count: rows)
 
-        // Maze mit DFS-Backtracker schnitzen
         func carveMaze(from start: (r: Int, c: Int)) {
             var stack: [(r: Int, c: Int)] = [start]
             grid[start.r][start.c].visited = true
@@ -136,29 +154,31 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             }
         }
 
-        // Maze schnitzen; Start unten links
         carveMaze(from: (r: 0, c: 0))
 
-        // Eintritt/Austritt öffnen
-        grid[0][0].bottom = false                // Eingang unten links
-        grid[rows-1][cols-1].top = false         // Ausgang oben rechts
+        grid[0][0].bottom = false
+        grid[rows-1][cols-1].top = false
 
-        // Helper zum Wandzeichnen
         func addWall(center: CGPoint, size: CGSize) {
-            let wall = SKShapeNode(rectOf: size, cornerRadius: 2)
+            let wall = SKNode()
             wall.position = center
-            wall.fillColor = .gray
-            wall.strokeColor = .white
-            wall.lineWidth = 1.5
-            wall.zPosition = -5
             wall.physicsBody = SKPhysicsBody(rectangleOf: size)
             wall.physicsBody?.isDynamic = false
             wall.physicsBody?.categoryBitMask = 0x1 << 2
             wall.physicsBody?.collisionBitMask = 0
             worldNode.addChild(wall)
+
+            // Outline für visuelles Feedback
+            let outline = SKShapeNode(rectOf: size)
+            outline.position = center
+            outline.strokeColor = .yellow
+            outline.lineWidth = 2
+            outline.isHidden = true
+            outline.zPosition = 50
+            worldNode.addChild(outline)
+            wallOutlines.append(outline)
         }
 
-        // Wände zeichnen ohne Duplikate
         for r in 0..<rows {
             for c in 0..<cols {
                 let cellMinX = mazeOrigin.x + CGFloat(c) * cellSize
@@ -166,25 +186,21 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
                 let centerX  = cellMinX + cellSize/2
                 let centerY  = cellMinY + cellSize/2
 
-                // bottom
                 if grid[r][c].bottom {
                     let y = cellMinY
                     addWall(center: CGPoint(x: centerX, y: y),
                             size: CGSize(width: cellSize, height: thickness))
                 }
-                // right
                 if grid[r][c].right {
                     let x = cellMinX + cellSize
                     addWall(center: CGPoint(x: x, y: centerY),
                             size: CGSize(width: thickness, height: cellSize))
                 }
-                // top nur in oberster Reihe
                 if r == rows - 1 && grid[r][c].top {
                     let y = cellMinY + cellSize
                     addWall(center: CGPoint(x: centerX, y: y),
                             size: CGSize(width: cellSize, height: thickness))
                 }
-                // left nur in linker Spalte
                 if c == 0 && grid[r][c].left {
                     let x = cellMinX
                     addWall(center: CGPoint(x: x, y: centerY),
@@ -194,19 +210,13 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         }
     }
 
-    // MARK: - Arrow (spieler zentriert im Zellzentrum)
+    // MARK: - Arrow
     private func setupArrowAtStart() {
-        // Startzelle (unten links)
         playerRC = (0, 0)
-
         arrow.path = arrowPath(size: 60)
         arrow.fillColor = .systemPink
         arrow.strokeColor = .clear
         arrow.zPosition = 10
-
-        // Keine Physik am Player — wir bewegen diskret im Grid
-        arrow.physicsBody = nil
-
         arrow.position = centerOfCell(playerRC.r, playerRC.c)
         worldNode.addChild(arrow)
     }
@@ -253,7 +263,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         cam.constraints = [follow, xLock, yLock]
     }
 
-    // MARK: - Touch Handling
+    // MARK: - Touches
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         touchStart = touches.first?.location(in: self)
     }
@@ -282,7 +292,6 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         touchStart = nil
     }
 
-    // MARK: - Direction Classification (nur 4 Richtungen)
     private func classifySwipe(dx: CGFloat, dy: CGFloat) -> Dir {
         if abs(dx) > abs(dy) {
             return dx > 0 ? .right : .left
@@ -291,21 +300,13 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         }
     }
 
-    // MARK: - Diskrete Grid-Bewegung
+    // MARK: - Movement
     private func canMove(from r: Int, _ c: Int, dir: Dir) -> Bool {
         switch dir {
-        case .up:
-            guard r+1 < rows else { return false }
-            return !grid[r][c].top
-        case .down:
-            guard r-1 >= 0 else { return false }
-            return !grid[r][c].bottom
-        case .right:
-            guard c+1 < cols else { return false }
-            return !grid[r][c].right
-        case .left:
-            guard c-1 >= 0 else { return false }
-            return !grid[r][c].left
+        case .up:    return r+1 < rows && !grid[r][c].top
+        case .down:  return r-1 >= 0 && !grid[r][c].bottom
+        case .right: return c+1 < cols && !grid[r][c].right
+        case .left:  return c-1 >= 0 && !grid[r][c].left
         }
     }
 
@@ -319,7 +320,6 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     }
 
     private func tryMove(_ dir: Dir) {
-        // Rotationwinkel
         let angle: CGFloat = {
             switch dir {
             case .up: return .pi/2
@@ -343,8 +343,8 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             ])
             arrow.run(SKAction.group([move, pulse]))
         } else {
-            // Blockiert -> Haptik + kurzes "Bump"
             hapticImpact()
+            showNearbyWalls()
             let bump = SKAction.sequence([
                 SKAction.scale(to: 0.92, duration: 0.06),
                 SKAction.scale(to: 1.0, duration: 0.08)
@@ -354,7 +354,19 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         }
     }
 
-    // MARK: - Physics Contact (nicht mehr genutzt für den Player)
+    private func showNearbyWalls() {
+        let radius: CGFloat = 220
+        for outline in wallOutlines {
+            if outline.position.distance(to: arrow.position) < radius {
+                outline.isHidden = false
+                outline.run(SKAction.sequence([
+                    SKAction.wait(forDuration: 0.5),
+                    SKAction.run { outline.isHidden = true }
+                ]))
+            }
+        }
+    }
+
     func didBegin(_ contact: SKPhysicsContact) { }
 
     // MARK: - Haptics
@@ -378,6 +390,13 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             let player = try engine.makePlayer(with: pattern)
             try player.start(atTime: 0)
         } catch { }
+    }
+}
+
+// MARK: - Hilfs-Extension
+private extension CGPoint {
+    func distance(to other: CGPoint) -> CGFloat {
+        return hypot(x - other.x, y - other.y)
     }
 }
 
