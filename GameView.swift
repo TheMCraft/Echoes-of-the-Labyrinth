@@ -9,6 +9,9 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     private let worldNode = SKNode()
     private let arrow = SKShapeNode()
     private var cam: SKCameraNode!
+    
+    // Key
+    private var keyNode: SKShapeNode?
 
     // Sichtfeld
     private let cropNode = SKCropNode()
@@ -44,9 +47,13 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     private let swipeMinDistance: CGFloat = 20
     private let cameraZoom: CGFloat = 1
     private let moveDuration: TimeInterval = 0.12
+    private struct Coord: Hashable {
+        let r: Int
+        let c: Int
+    }
 
     private enum Dir { case up, down, left, right }
-
+    
     // MARK: - Lifecycle
     override func didMove(to view: SKView) {
         addChild(cropNode)
@@ -63,6 +70,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         addBackground()            // <-- nach setupWorld
         buildMazeAndWalls()
         setupArrowAtStart()
+        spawnKey()
         setupCamera()
         setupHaptics()
         updateCameraConstraints()
@@ -263,44 +271,18 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         cam.constraints = [follow, xLock, yLock]
     }
 
-    // MARK: - Touches
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchStart = touches.first?.location(in: self)
-    }
-
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let start = touchStart,
-              let end = touches.first?.location(in: self) else {
-            touchStart = nil
-            return
-        }
-        let dx = end.x - start.x
-        let dy = end.y - start.y
-        let distance = hypot(dx, dy)
-
-        guard distance >= swipeMinDistance else {
-            touchStart = nil
-            return
-        }
-
-        let direction = classifySwipe(dx: dx, dy: dy)
-        tryMove(direction)
-        touchStart = nil
-    }
-
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchStart = nil
-    }
-
-    private func classifySwipe(dx: CGFloat, dy: CGFloat) -> Dir {
-        if abs(dx) > abs(dy) {
-            return dx > 0 ? .right : .left
-        } else {
-            return dy > 0 ? .up : .down
-        }
-    }
-
     // MARK: - Movement
+
+    // Decide swipe direction by dominant axis
+    private func classifySwipe(dx: CGFloat, dy: CGFloat) -> Dir {
+        // If the horizontal magnitude is greater, go left/right; otherwise up/down
+        if abs(dx) > abs(dy) {
+            return dx >= 0 ? .right : .left
+        } else {
+            return dy >= 0 ? .up : .down
+        }
+    }
+
     private func canMove(from r: Int, _ c: Int, dir: Dir) -> Bool {
         switch dir {
         case .up:    return r+1 < rows && !grid[r][c].top
@@ -344,7 +326,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             arrow.run(SKAction.group([move, pulse]))
         } else {
             hapticImpact()
-            showNearbyWalls()
+            showNearbyWalls(dir)
             let bump = SKAction.sequence([
                 SKAction.scale(to: 0.92, duration: 0.06),
                 SKAction.scale(to: 1.0, duration: 0.08)
@@ -354,10 +336,23 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         }
     }
 
-    private func showNearbyWalls() {
-        let radius: CGFloat = 220
+    private func showNearbyWalls(_ dir: Dir) {
+        let (r, c) = playerRC
+        var wallPos = centerOfCell(r, c)
+
+        switch dir {
+        case .up:
+            wallPos.y += cellSize / 2
+        case .down:
+            wallPos.y -= cellSize / 2
+        case .right:
+            wallPos.x += cellSize / 2
+        case .left:
+            wallPos.x -= cellSize / 2
+        }
+
         for outline in wallOutlines {
-            if outline.position.distance(to: arrow.position) < radius {
+            if outline.position.distance(to: wallPos) < cellSize * 0.3 {
                 outline.isHidden = false
                 outline.run(SKAction.sequence([
                     SKAction.wait(forDuration: 0.5),
@@ -365,6 +360,83 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
                 ]))
             }
         }
+    }
+
+    private func spawnKey() {
+        // BFS aller erreichbaren Zellen
+        func reachableCells(from start: (Int, Int)) -> Set<Coord> {
+            var visited: Set<Coord> = [Coord(r: start.0, c: start.1)]
+            var queue: [Coord] = [Coord(r: start.0, c: start.1)]
+            var head = 0
+            // harte Obergrenze gegen Logikfehler
+            let maxNodes = rows * cols
+
+            while head < queue.count {
+                let current = queue[head]; head += 1
+                let r = current.r, c = current.c
+
+                for dir in [Dir.up, .down, .left, .right] {
+                    if canMove(from: r, c, dir: dir) {
+                        let (nr, nc) = nextCell(from: r, c, dir: dir)
+                        let next = Coord(r: nr, c: nc)
+                        if !visited.contains(next) {
+                            visited.insert(next)
+                            queue.append(next)
+                            if visited.count >= maxNodes { return visited }
+                        }
+                    }
+                }
+            }
+            return visited
+        }
+
+        let start = playerRC
+        let reachable = Array(reachableCells(from: start))   // [Coord]
+        if reachable.isEmpty { return }
+
+        // mind. 5 Schritte entfernt, Startfeld raus
+        let minSteps = 5
+        let far = reachable.filter { coord in
+            guard !(coord.r == start.r && coord.c == start.c) else { return false }
+            let dr = abs(coord.r - start.r)
+            let dc = abs(coord.c - start.c)
+            return dr + dc >= minSteps
+        }
+
+        // Fallbacks: weit entfernt → sonst irgendeine andere erreichbare Zelle → sonst abbrechen
+        let pick: Coord? = far.randomElement()
+            ?? reachable.first { !($0.r == start.r && $0.c == start.c) }
+            ?? nil
+        guard let target = pick else { return }
+
+        // existierenden Key ersetzen
+        keyNode?.removeFromParent()
+
+        let keyPos = centerOfCell(target.r, target.c)
+        let key = SKShapeNode(circleOfRadius: cellSize * 0.25)
+        key.fillColor = .systemYellow
+        key.strokeColor = .white
+        key.glowWidth = 4
+        key.zPosition = 20
+        key.position = keyPos
+
+        // optional: leichter Puls
+        let pulse = SKAction.sequence([
+            SKAction.scale(to: 1.15, duration: 0.5),
+            SKAction.scale(to: 1.0, duration: 0.5)
+        ])
+        key.run(SKAction.repeatForever(pulse))
+
+        worldNode.addChild(key)
+        keyNode = key
+    }
+
+    private func keyDistanceInCells() -> Int {
+        guard let key = keyNode, cellSize > 0 else { return 0 }
+        let kp = key.position
+        let kr = max(0, min(rows - 1, Int(round(((kp.y - mazeOrigin.y) / cellSize) - 0.5))))
+        let kc = max(0, min(cols - 1, Int(round(((kp.x - mazeOrigin.x) / cellSize) - 0.5))))
+        return abs(kr - playerRC.r) + abs(kc - playerRC.c)
     }
 
     func didBegin(_ contact: SKPhysicsContact) { }
@@ -380,16 +452,139 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         }
     }
 
-    private func hapticImpact() {
+    private func hapticImpact(duration: TimeInterval? = nil,
+                              intensity: Float = 0.9,
+                              sharpness: Float = 0.7) {
         guard let engine = haptics else { return }
-        let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.9)
-        let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.7)
-        let event = CHHapticEvent(eventType: .hapticTransient, parameters: [intensity, sharpness], relativeTime: 0)
+        let i = CHHapticEventParameter(parameterID: .hapticIntensity, value: intensity)
+        let s = CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpness)
+
+        let event: CHHapticEvent
+        if let d = duration, d > 0 {
+            event = CHHapticEvent(eventType: .hapticContinuous, parameters: [i, s], relativeTime: 0, duration: d)
+        } else {
+            event = CHHapticEvent(eventType: .hapticTransient, parameters: [i, s], relativeTime: 0)
+        }
+
         do {
+            try? engine.start()
             let pattern = try CHHapticPattern(events: [event], parameters: [])
             let player = try engine.makePlayer(with: pattern)
             try player.start(atTime: 0)
         } catch { }
+    }
+    
+    // State
+    private var isHolding = false
+    private var holdWorkItem: DispatchWorkItem?
+    private let longPressDelay: TimeInterval = 0.35
+
+    // Helpers
+    private func startHoldDetection() {
+        holdWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.isHolding = true
+            self.onHoldStart()
+        }
+        holdWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + longPressDelay, execute: work)
+    }
+
+    private func cancelPendingHold() {
+        holdWorkItem?.cancel()
+        holdWorkItem = nil
+    }
+
+    private func endActiveHold() {
+        if isHolding {
+            isHolding = false
+            onHoldEnd()
+        }
+    }
+
+    // Override touches
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        touchStart = touches.first?.location(in: self)
+        startHoldDetection()
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let start = touchStart,
+              let cur = touches.first?.location(in: self) else { return }
+        let dx = cur.x - start.x
+        let dy = cur.y - start.y
+        let distance = hypot(dx, dy)
+
+        // If user starts swiping before the long‑press fires, cancel pending hold
+        if !isHolding && distance > swipeMinDistance {
+            cancelPendingHold()
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        defer { touchStart = nil }
+        if isHolding {
+            endActiveHold()            // end long‑press
+            return                      // skip swipe
+        }
+        cancelPendingHold()            // no hold -> treat as swipe
+        guard let start = touchStart,
+              let end = touches.first?.location(in: self) else { return }
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let distance = hypot(dx, dy)
+        guard distance >= swipeMinDistance else { return }
+        let direction = classifySwipe(dx: dx, dy: dy)
+        tryMove(direction)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        cancelPendingHold()
+        endActiveHold()
+        touchStart = nil
+    }
+
+    private var holdTask: Task<Void, Never>? // ohne @MainActor hier!
+
+    private func onHoldStart() {
+        holdTask?.cancel()
+
+        holdTask = Task {
+            await self.runHoldSequence()
+        }
+    }
+
+    @MainActor
+    private func runHoldSequence() async {
+        hapticImpact(duration: 1.0, intensity: 0.5, sharpness: 0.5)
+
+        try? await Task.sleep(nanoseconds: 2_200_000_000)
+
+        let baseDelay: UInt64 = 150_000_000
+        let growthFactor: Double = 1.15
+        let count = keyDistanceInCells()
+
+        var currentDelay = Double(baseDelay)
+
+        for i in 0..<count {
+            try? Task.checkCancellation()
+            print("Index \(i)")
+            hapticImpact(duration: 0.1, intensity: 0.6, sharpness: 0.6)
+            try? await Task.sleep(nanoseconds: UInt64(currentDelay))
+            currentDelay *= growthFactor
+        }
+
+        for _ in 0..<2 {
+            try? Task.checkCancellation()
+            hapticImpact(duration: 0.1, intensity: 0.9, sharpness: 0.9)
+            try? await Task.sleep(nanoseconds: 120_000_000)
+        }
+    }
+
+    private func onHoldEnd() {
+        holdTask?.cancel()
+        holdTask = nil
     }
 }
 
@@ -414,3 +609,4 @@ struct GameView: View {
             .ignoresSafeArea()
     }
 }
+
