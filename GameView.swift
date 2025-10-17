@@ -341,6 +341,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             userHasKey = true
             keyNode?.removeFromParent()
             onKeyStateChange?(true)
+            keyPickupFeedback()
         }
             
     }
@@ -597,6 +598,26 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         holdTask?.cancel()
         holdTask = nil
     }
+    
+    private func keyPickupFeedback() {
+        guard haptics != nil else { return }
+
+        Task { @MainActor in
+            // Kurzer kräftiger Startimpuls
+            hapticImpact(duration: 0.08, intensity: 1.0, sharpness: 0.9)
+            try? await Task.sleep(nanoseconds: 100_000_000)
+
+            // Zwei schnelle, weichere „Echo“-Impacts
+            hapticImpact(duration: 0.05, intensity: 0.7, sharpness: 0.5)
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            hapticImpact(duration: 0.05, intensity: 0.6, sharpness: 0.4)
+            try? await Task.sleep(nanoseconds: 150_000_000)
+
+            // Kleiner „Nachglüher“ – sanfter Ausklang
+            hapticImpact(duration: 0.1, intensity: 0.3, sharpness: 0.2)
+        }
+    }
+
 }
 
 // MARK: - Hilfs-Extension
