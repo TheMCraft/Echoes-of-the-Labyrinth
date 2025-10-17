@@ -12,6 +12,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     
     // Key
     private var keyNode: SKShapeNode?
+    private var userHasKey: Bool = false
 
     // Sichtfeld
     private let cropNode = SKCropNode()
@@ -181,7 +182,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             outline.position = center
             outline.strokeColor = .yellow
             outline.lineWidth = 2
-            outline.isHidden = true
+            outline.isHidden = !GameSettings.shared.isDebugMode
             outline.zPosition = 50
             worldNode.addChild(outline)
             wallOutlines.append(outline)
@@ -325,8 +326,10 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             ])
             arrow.run(SKAction.group([move, pulse]))
         } else {
+            if !GameSettings.shared.isDebugMode {
+                showNearbyWalls(dir)
+            }
             hapticImpact()
-            showNearbyWalls(dir)
             let bump = SKAction.sequence([
                 SKAction.scale(to: 0.92, duration: 0.06),
                 SKAction.scale(to: 1.0, duration: 0.08)
@@ -334,7 +337,15 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             let rotate = SKAction.rotate(toAngle: angle, duration: 0.08, shortestUnitArc: true)
             arrow.run(SKAction.group([bump, rotate]))
         }
+        if keyDistanceInCells() == 0 {
+            userHasKey = true
+            keyNode?.removeFromParent()
+            onKeyStateChange?(true)
+        }
+            
     }
+    
+    var onKeyStateChange: ((Bool) -> Void)?
 
     private func showNearbyWalls(_ dir: Dir) {
         let (r, c) = playerRC
@@ -362,7 +373,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         }
     }
 
-    private func spawnKey() {
+    private func spawnKey() { //BUG: Key kann in unerreichbaren Stellen des Labyrinths spawnen
         // BFS aller erreichbaren Zellen
         func reachableCells(from start: (Int, Int)) -> Set<Coord> {
             var visited: Set<Coord> = [Coord(r: start.0, c: start.1)]
@@ -559,7 +570,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     private func runHoldSequence() async {
         hapticImpact(duration: 1.0, intensity: 0.5, sharpness: 0.5)
 
-        try? await Task.sleep(nanoseconds: 2_200_000_000)
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
 
         let baseDelay: UInt64 = 150_000_000
         let growthFactor: Double = 1.15
@@ -603,10 +614,28 @@ struct GameView: View {
         scene.scaleMode = .resizeFill
         return scene
     }()
+    
+    @State private var userHasKey = false
 
     var body: some View {
-        SpriteView(scene: scene)
-            .ignoresSafeArea()
+        ZStack(alignment: .topTrailing) {
+            SpriteView(scene: scene)
+                .ignoresSafeArea()
+                .onAppear {
+                    // Scene bekommt Callback
+                    scene.onKeyStateChange = { hasKey in
+                        userHasKey = hasKey
+                    }
+                }
+
+            if userHasKey {
+                Image(systemName: "key.fill")
+                    .font(.system(size: 32))
+                    .foregroundColor(.yellow)
+                    .padding(20)
+                    .shadow(radius: 3)
+                    .transition(.scale)
+            }
+        }
     }
 }
-
