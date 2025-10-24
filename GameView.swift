@@ -1,6 +1,7 @@
 import SwiftUI
 import SpriteKit
 import CoreHaptics
+import simd
 
 // MARK: - SpriteKit Scene
 final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
@@ -9,7 +10,17 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     private let worldNode = SKNode()
     private let arrow = SKShapeNode()
     private var cam: SKCameraNode!
-    
+
+    // Background outside vision
+    private let bgLayer = SKNode()
+    private var outerBG: SKSpriteNode?
+    private var bgShader: SKShader?
+    private var bgStartTime: CFTimeInterval = 0
+    // New: parallax stars outside the vision
+    private let starsFar = SKNode()
+    private let starsNear = SKNode()
+    private var starsSpawnedForSize: CGSize = .zero
+
     // Key
     private var keyNode: SKShapeNode?
     private var userHasKey: Bool = false
@@ -62,6 +73,17 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     
     // MARK: - Lifecycle
     override func didMove(to view: SKView) {
+        // Background layer (drawn behind everything)
+        bgLayer.zPosition = -10000
+        addChild(bgLayer)
+        setupOuterBackground()
+
+        // Add starfield layers behind crop/world
+        starsFar.zPosition = -9999
+        starsNear.zPosition = -9998
+        bgLayer.addChild(starsFar)
+        bgLayer.addChild(starsNear)
+
         addChild(cropNode)
         cropNode.addChild(worldNode)
 
@@ -94,11 +116,15 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         setupCamera()
         setupHaptics()
         updateCameraConstraints()
+        // Spawn stars after camera is available (size-aware)
+        setupParallaxStars()
     }
 
 
     override func didChangeSize(_ oldSize: CGSize) {
         updateCameraConstraints()
+        updateOuterBackgroundFrame()
+        setupParallaxStars()
     }
 
     override func update(_ currentTime: TimeInterval) {
@@ -106,6 +132,24 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         visionShadow.position = arrow.position // Schattenring folgt dem Maskenmittelpunkt
         // Echo-Layer positioniert sich auf die gleiche Weltposition wie der Pfeil
         echoLayer.position = worldNode.convert(arrow.position, to: cropNode)
+        
+        // Animate background shader
+        if bgStartTime == 0 { bgStartTime = currentTime }
+        let t = Float(currentTime - bgStartTime)
+        if let shader = bgShader {
+            shader.uniformNamed("u_time")?.floatValue = t
+            // Center stays at screen center -> 0.5, 0.5
+        }
+        // keep background aligned with camera
+        if let cam = cam, let bg = outerBG { bg.position = cam.position }
+        // Parallax starfield follows camera subtly
+        if let cam = cam {
+            let px = cam.position.x
+            let py = cam.position.y
+            starsFar.position = CGPoint(x: px * 0.04, y: py * 0.04)
+            starsNear.position = CGPoint(x: px * 0.08, y: py * 0.08)
+        }
+
         checkKeyProximity()
     }
     
@@ -149,6 +193,157 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         worldNode.addChild(bg)   // <- statt addChild(self), ins worldNode
     }
 
+    // Outer background (outside vision circle)
+    private func setupOuterBackground() {
+        guard let view = self.view else { return }
+        let visibleW = view.bounds.width * cameraZoom
+        let visibleH = view.bounds.height * cameraZoom
+        let size = CGSize(width: visibleW + 40, height: visibleH + 40) // slight bleed
+
+        // Richer aurora-like gradient with gentle swirl, bands and pulse
+        let src = """
+        vec3 hsv2rgb(vec3 c){
+            vec3 p = abs(fract(c.xxx + vec3(0.0, 0.6666667, 0.3333333))*6.0 - 3.0);
+            return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+        }
+        void main() {
+            vec2 uv = v_tex_coord; // 0..1
+            vec2 center = vec2(0.5, 0.5);
+            vec2 p = uv - center;
+            float t = u_time;
+
+            // gentle global rotation
+            float angRot = t * 0.04;
+            float cs = cos(angRot), sn = sin(angRot);
+            mat2 R = mat2(cs, -sn, sn, cs);
+            p = R * p;
+            uv = p + center;
+
+            float r = length(p);
+            float ang = atan(p.y, p.x);
+
+            // soft swirl depending on radius
+            float swirl = 0.08 * sin(6.0 * r - t * 0.8);
+            ang += swirl;
+            vec2 pr = vec2(cos(ang), sin(ang)) * r;
+
+            // Base aurora palette driven by time and angle
+            float g = smoothstep(0.98, 0.18, r);
+            float hue = 0.58 + 0.08 * sin(t * 0.12) + 0.05 * sin(ang * 3.0 + t * 0.3);
+            float sat = 0.40 + 0.25 * sin(t * 0.07 + 2.0);
+            float val = 0.18 + 0.45 * g;
+            vec3 base = hsv2rgb(vec3(hue, clamp(sat, 0.0, 1.0), clamp(val, 0.0, 1.0)));
+
+            // Animated soft bands
+            float band1 = sin((pr.x * 3.8 + pr.y * 4.2) * 3.14159 + t * 0.55) * 0.06;
+            float band2 = sin((pr.x * -6.2 + pr.y * 5.4) * 3.14159 - t * 0.32) * 0.045;
+            float band3 = sin((pr.x * 2.4 - pr.y * 3.7) * 3.14159 + t * 0.18) * 0.03;
+            vec3 col = base + (band1 + band2 + band3);
+
+            // Gentle radial pulse and a faint ring
+            float pulse = 0.03 * sin(6.28318 * (r * 1.0 - t * 0.12));
+            float ring = smoothstep(0.36, 0.34, r) - smoothstep(0.44, 0.42, r);
+            col += vec3(pulse) + vec3(0.08) * ring;
+
+            // Very subtle grain to avoid flat areas
+            float n = fract(sin(dot(uv, vec2(12.9898,78.233)) + t * 0.1) * 43758.5453);
+            col += (n - 0.5) * 0.02;
+
+            // Vignette at edges
+            float vig = smoothstep(1.15, 0.64, r);
+            col *= vec3(vig);
+
+            gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+        }
+        """
+        let shader = SKShader(source: src, uniforms: [
+            SKUniform(name: "u_time", float: 0)
+        ])
+        bgShader = shader
+
+        let node = SKSpriteNode(color: .black, size: size)
+        node.shader = shader
+        node.zPosition = -10000
+        node.alpha = 1.0
+        node.position = cam?.position ?? .zero
+        outerBG = node
+        bgLayer.removeAllChildren()
+        bgLayer.addChild(node)
+        
+        backgroundColor = .black // fallback color
+    }
+
+    private func updateOuterBackgroundFrame() {
+        guard let view = self.view, let bg = outerBG else { return }
+        let visibleW = view.bounds.width * cam.xScale
+        let visibleH = view.bounds.height * cam.yScale
+        bg.size = CGSize(width: visibleW + 40, height: visibleH + 40)
+        if let cam = cam { bg.position = cam.position }
+    }
+
+    // New: create and update a parallax starfield outside the vision circle
+    private func setupParallaxStars() {
+        guard let view = self.view, cam != nil else { return }
+        let w = view.bounds.width * cam.xScale
+        let h = view.bounds.height * cam.yScale
+        let size = CGSize(width: w, height: h)
+        // Avoid re-spawn if size hasn't changed much
+        if abs(size.width - starsSpawnedForSize.width) < 10 && abs(size.height - starsSpawnedForSize.height) < 10 {
+            return
+        }
+        starsSpawnedForSize = size
+
+        // Clear old
+        starsFar.removeAllActions()
+        starsNear.removeAllActions()
+        starsFar.removeAllChildren()
+        starsNear.removeAllChildren()
+
+        // Spawn across an area larger than the viewport, so panning doesn't show edges
+        let pad: CGFloat = 220
+        let area = CGSize(width: size.width + pad * 2, height: size.height + pad * 2)
+        spawnStars(count: 120, area: area, into: starsFar, radiusRange: 0.6...1.4, alpha: 0.7, twinkleRange: 1.2...2.2, drift: 6)
+        spawnStars(count: 60,  area: area, into: starsNear, radiusRange: 1.0...2.4, alpha: 0.9, twinkleRange: 0.8...1.6, drift: 10)
+    }
+
+    private func spawnStars(count: Int,
+                            area: CGSize,
+                            into container: SKNode,
+                            radiusRange: ClosedRange<CGFloat>,
+                            alpha: CGFloat,
+                            twinkleRange: ClosedRange<TimeInterval>,
+                            drift: CGFloat) {
+        let halfW = area.width / 2
+        let halfH = area.height / 2
+        for _ in 0..<count {
+            let r = CGFloat.random(in: radiusRange)
+            let s = SKShapeNode(circleOfRadius: r)
+            s.fillColor = .white
+            s.strokeColor = .clear
+            s.alpha = alpha * CGFloat.random(in: 0.5...1.0)
+            s.blendMode = .add
+            s.position = CGPoint(x: CGFloat.random(in: -halfW...halfW),
+                                 y: CGFloat.random(in: -halfH...halfH))
+            container.addChild(s)
+
+            // Twinkle animation
+            let t1 = TimeInterval.random(in: twinkleRange)
+            let t2 = TimeInterval.random(in: twinkleRange)
+            let wait = SKAction.wait(forDuration: TimeInterval.random(in: 0.0...1.0))
+            let twinkle = SKAction.repeatForever(SKAction.sequence([
+                SKAction.fadeAlpha(to: s.alpha * 0.3, duration: t1 * 0.5),
+                SKAction.fadeAlpha(to: s.alpha, duration: t2 * 0.5)
+            ]))
+            s.run(SKAction.sequence([wait, twinkle]))
+
+            // Slow drift
+            let dx = CGFloat.random(in: -drift...drift)
+            let dy = CGFloat.random(in: -drift...drift)
+            let move = SKAction.moveBy(x: dx, y: dy, duration: TimeInterval.random(in: 3.0...6.0))
+            move.timingMode = .easeInEaseOut
+            s.run(SKAction.repeatForever(SKAction.sequence([move, move.reversed()])))
+        }
+    }
 
     // MARK: - World
     private func setupWorld() {
@@ -331,6 +526,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         addChild(cam)
         cam.setScale(cameraZoom)
         cam.position = arrow.position
+        updateOuterBackgroundFrame()
     }
 
     private func updateCameraConstraints() {
@@ -347,6 +543,8 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         let xLock = SKConstraint.positionX(xRange)
         let yLock = SKConstraint.positionY(yRange)
         cam.constraints = [follow, xLock, yLock]
+
+        updateOuterBackgroundFrame()
     }
 
     // MARK: - Movement
@@ -1164,4 +1362,3 @@ extension SwipeScene {
         }
     }
 }
-
