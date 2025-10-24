@@ -284,14 +284,26 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     // New: create and update a parallax starfield outside the vision circle
     private func setupParallaxStars() {
         guard let view = self.view, cam != nil else { return }
-        let w = view.bounds.width * cam.xScale
-        let h = view.bounds.height * cam.yScale
-        let size = CGSize(width: w, height: h)
-        // Avoid re-spawn if size hasn't changed much
-        if abs(size.width - starsSpawnedForSize.width) < 10 && abs(size.height - starsSpawnedForSize.height) < 10 {
+        
+        // Baseline: what the viewport would have spawned (for density reference)
+        let visibleW = view.bounds.width * cam.xScale
+        let visibleH = view.bounds.height * cam.yScale
+        let pad: CGFloat = 220
+        let baselineAreaW = visibleW + pad * 2
+        let baselineAreaH = visibleH + pad * 2
+        let baselineArea = max(1.0, baselineAreaW * baselineAreaH)
+
+        // Target: spawn across the entire map (worldRect) with a bit of bleed
+        let mapAreaW = worldRect.width + pad * 2
+        let mapAreaH = worldRect.height + pad * 2
+        let mapArea = max(1.0, mapAreaW * mapAreaH)
+
+        let targetSize = CGSize(width: worldRect.width, height: worldRect.height)
+        // Avoid re-spawn if map size hasn't changed much
+        if abs(targetSize.width - starsSpawnedForSize.width) < 10 && abs(targetSize.height - starsSpawnedForSize.height) < 10 {
             return
         }
-        starsSpawnedForSize = size
+        starsSpawnedForSize = targetSize
 
         // Clear old
         starsFar.removeAllActions()
@@ -299,11 +311,20 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         starsFar.removeAllChildren()
         starsNear.removeAllChildren()
 
-        // Spawn across an area larger than the viewport, so panning doesn't show edges
-        let pad: CGFloat = 220
-        let area = CGSize(width: size.width + pad * 2, height: size.height + pad * 2)
-        spawnStars(count: 120, area: area, into: starsFar, radiusRange: 0.6...1.4, alpha: 0.7, twinkleRange: 1.2...2.2, drift: 6)
-        spawnStars(count: 60,  area: area, into: starsNear, radiusRange: 1.0...2.4, alpha: 0.9, twinkleRange: 0.8...1.6, drift: 10)
+        // Density scaling to keep roughly the same look across the full map
+        let areaRatio = CGFloat(mapArea / baselineArea)
+        let baseFar = 120
+        let baseNear = 60
+        let scaledFar = Int((CGFloat(baseFar) * areaRatio).rounded())
+        let scaledNear = Int((CGFloat(baseNear) * areaRatio).rounded())
+        // Safety caps to avoid extreme node counts on very large maps
+        let farCount = min(max(scaledFar, baseFar), 2200)
+        let nearCount = min(max(scaledNear, baseNear), 1200)
+
+        // Spawn across an area larger than the full map, so panning never shows edges
+        let area = CGSize(width: mapAreaW, height: mapAreaH)
+        spawnStars(count: farCount, area: area, into: starsFar, radiusRange: 0.6...1.4, alpha: 0.7, twinkleRange: 1.2...2.2, drift: 6)
+        spawnStars(count: nearCount, area: area, into: starsNear, radiusRange: 1.0...2.4, alpha: 0.9, twinkleRange: 0.8...1.6, drift: 10)
     }
 
     private func spawnStars(count: Int,
