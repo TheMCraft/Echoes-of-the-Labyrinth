@@ -17,6 +17,11 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     // Sichtfeld
     private let cropNode = SKCropNode()
     private let maskNode = SKShapeNode(circleOfRadius: 180)
+    private let visionShadow = SKShapeNode() // subtiler innerer Schattenring
+    private let effectsLayer = SKNode()      // Layer für Effekte (Ripple/Dust)
+    private let echoLayer = SKNode()         // Layer für Echo-Animationen
+    private var chargeNode: SKShapeNode?     // Auflade-Ring
+    private let overlayLayer = SKNode()      // Nicht gecroppt: über dem Hintergrund für epische Effekte
 
     // Welt
     private var worldSide: CGFloat = 0
@@ -64,13 +69,27 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         maskNode.strokeColor = .clear
         cropNode.maskNode = maskNode
 
+        // Effekte-Layer wird innerhalb des Crops geclipped
+        effectsLayer.zPosition = 900
+        cropNode.addChild(effectsLayer)
+
+        // Echo-Layer über anderen Effekten
+        echoLayer.zPosition = 960
+        cropNode.addChild(echoLayer)
+
+        // Overlay-Layer über allem, nicht gecroppt
+        overlayLayer.zPosition = 5000
+        addChild(overlayLayer)
+
         physicsWorld.gravity = .zero
         physicsWorld.contactDelegate = self
 
         setupWorld()
-        addBackground()            // <-- nach setupWorld
+        addBackground()
         buildMazeAndWalls()
         setupArrowAtStart()
+        setupVisionShadow()
+        setupAmbientDust()
         spawnKey()
         setupCamera()
         setupHaptics()
@@ -84,7 +103,42 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
 
     override func update(_ currentTime: TimeInterval) {
         maskNode.position = arrow.position
+        visionShadow.position = arrow.position // Schattenring folgt dem Maskenmittelpunkt
+        // Echo-Layer positioniert sich auf die gleiche Weltposition wie der Pfeil
+        echoLayer.position = worldNode.convert(arrow.position, to: cropNode)
+        checkKeyProximity()
     }
+    
+    private var nearKeyTask: Task<Void, Never>? = nil
+    private var isNearKey: Bool = false
+
+    private func checkKeyProximity() {
+        let near = keyDistanceInCells() == 1 && !userHasKey
+
+        if near && !isNearKey {
+            isNearKey = true
+            startNearKeyVibration()
+        } else if !near && isNearKey {
+            isNearKey = false
+            stopNearKeyVibration()
+        }
+    }
+
+    private func startNearKeyVibration() {
+        nearKeyTask?.cancel()
+        nearKeyTask = Task {
+            while !Task.isCancelled {
+                hapticImpact(duration: 0.05, intensity: 0.3, sharpness: 0.2)
+                try? await Task.sleep(nanoseconds: 300_000_000) // 0.3 Sek Abstand
+            }
+        }
+    }
+
+    private func stopNearKeyVibration() {
+        nearKeyTask?.cancel()
+        nearKeyTask = nil
+    }
+    
 
     // MARK: - Hintergrund
     private func addBackground() {
@@ -247,6 +301,29 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         return CGPoint(x: x, y: y)
     }
 
+    // MARK: - Vision Shadow
+    private func setupVisionShadow() {
+        // Mask-Radius aus Pfad ableiten (Fallback: 180)
+        let radius: CGFloat = {
+            if let path = maskNode.path { return path.boundingBox.width * 0.5 }
+            return 180
+        }()
+        let circleRect = CGRect(x: -radius, y: -radius, width: radius * 2, height: radius * 2)
+        let circlePath = CGPath(ellipseIn: circleRect, transform: nil)
+
+        visionShadow.path = circlePath
+        visionShadow.fillColor = .clear
+        visionShadow.strokeColor = .black
+        visionShadow.alpha = 0.28
+        visionShadow.lineWidth = 28
+        visionShadow.glowWidth = 6
+        visionShadow.isAntialiased = true
+        visionShadow.zPosition = 1000
+
+        visionShadow.position = arrow.position
+        cropNode.addChild(visionShadow)
+    }
+
     // MARK: - Camera
     private func setupCamera() {
         cam = SKCameraNode()
@@ -317,6 +394,9 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             playerRC = (nr, nc)
             let target = centerOfCell(nr, nc)
 
+            // Trail-Ghost am Startpunkt
+            spawnArrowGhost(at: arrow.position, angle: arrow.zRotation)
+
             arrow.removeAllActions()
             let move = SKAction.move(to: target, duration: moveDuration)
             let rotate = SKAction.rotate(toAngle: angle, duration: 0.08, shortestUnitArc: true)
@@ -330,6 +410,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
                 showNearbyWalls(dir)
             }
             hapticImpact()
+            cameraShake(intensity: 6, duration: 0.12)
             let bump = SKAction.sequence([
                 SKAction.scale(to: 0.92, duration: 0.06),
                 SKAction.scale(to: 1.0, duration: 0.08)
@@ -342,6 +423,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             keyNode?.removeFromParent()
             onKeyStateChange?(true)
             keyPickupFeedback()
+            spawnSparkles(at: arrow.position)
         }
             
     }
@@ -366,8 +448,17 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         for outline in wallOutlines {
             if outline.position.distance(to: wallPos) < cellSize * 0.3 {
                 outline.isHidden = false
+                // kurzer Flash
+                let oldColor = outline.strokeColor
+                outline.strokeColor = .white
+                outline.glowWidth = 4
                 outline.run(SKAction.sequence([
-                    SKAction.wait(forDuration: 0.5),
+                    SKAction.wait(forDuration: 0.12),
+                    SKAction.run {
+                        outline.strokeColor = oldColor
+                        outline.glowWidth = 0
+                    },
+                    SKAction.wait(forDuration: 0.38),
                     SKAction.run { outline.isHidden = true }
                 ]))
             }
@@ -441,6 +532,9 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
 
         worldNode.addChild(key)
         keyNode = key
+
+        // Spawn-Funken
+        spawnSparkles(at: keyPos)
     }
 
     private func keyDistanceInCells() -> Int {
@@ -519,6 +613,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         touchStart = touches.first?.location(in: self)
         startHoldDetection()
+        if let p = touchStart { spawnRipple(at: p) }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -569,9 +664,17 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
 
     @MainActor
     private func runHoldSequence() async {
+        // Start: Aufladeanimation + langer Haptik-Impuls
+        startEchoCharge()
         hapticImpact(duration: 1.0, intensity: 0.5, sharpness: 0.5)
 
+        // Dauer der Aufladung
         try? await Task.sleep(nanoseconds: 1_500_000_000)
+
+        // Ende der Aufladung visualisieren
+        stopEchoCharge()
+        ejectChargeBurst()                 // Ring wird aus dem Sichtfeld geschleudert (über Overlay)
+        spawnIncomingOrbs(count: 28)       // Viele kleine Kreise kommen von außen ins Sichtfeld
 
         let baseDelay: UInt64 = 150_000_000
         let growthFactor: Double = 1.15
@@ -579,17 +682,21 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
 
         var currentDelay = Double(baseDelay)
 
+        // Zwischenimpulse: Wellen, die zurückkommen
         for i in 0..<count {
             try? Task.checkCancellation()
             print("Index \(i)")
             hapticImpact(duration: 0.1, intensity: 0.6, sharpness: 0.6)
+            spawnEchoWave()
             try? await Task.sleep(nanoseconds: UInt64(currentDelay))
             currentDelay *= growthFactor
         }
 
+        // Doppelimpuls am Ende: Endanimation (keine Rückkehrwelle)
         for _ in 0..<2 {
             try? Task.checkCancellation()
             hapticImpact(duration: 0.1, intensity: 0.9, sharpness: 0.9)
+            spawnEndFlash()
             try? await Task.sleep(nanoseconds: 120_000_000)
         }
     }
@@ -597,27 +704,312 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     private func onHoldEnd() {
         holdTask?.cancel()
         holdTask = nil
+        clearEchoVisuals()
     }
-    
-    private func keyPickupFeedback() {
-        guard haptics != nil else { return }
 
-        Task { @MainActor in
-            // Kurzer kräftiger Startimpuls
-            hapticImpact(duration: 0.08, intensity: 1.0, sharpness: 0.9)
-            try? await Task.sleep(nanoseconds: 100_000_000)
+    private func clearEchoVisuals() {
+        stopEchoCharge()
+        echoLayer.removeAllActions()
+        echoLayer.removeAllChildren()
+        overlayLayer.removeAllActions()
+        overlayLayer.removeAllChildren()
+    }
 
-            // Zwei schnelle, weichere „Echo“-Impacts
-            hapticImpact(duration: 0.05, intensity: 0.7, sharpness: 0.5)
-            try? await Task.sleep(nanoseconds: 80_000_000)
-            hapticImpact(duration: 0.05, intensity: 0.6, sharpness: 0.4)
-            try? await Task.sleep(nanoseconds: 150_000_000)
+    // MARK: - Echo Visuals
+    private func startEchoCharge() {
+        // vorhandene Charge entfernen
+        chargeNode?.removeAllActions()
+        chargeNode?.removeFromParent()
 
-            // Kleiner „Nachglüher“ – sanfter Ausklang
-            hapticImpact(duration: 0.1, intensity: 0.3, sharpness: 0.2)
+        let r: CGFloat = 36
+        let ring = SKShapeNode(circleOfRadius: r)
+        ring.position = .zero
+        ring.fillColor = .clear
+        ring.strokeColor = .white
+        ring.lineWidth = 3
+        ring.alpha = 0.25
+        ring.glowWidth = 3
+        ring.zPosition = 0
+        echoLayer.addChild(ring)
+        chargeNode = ring
+
+        // Rotation + langsames Aufhellen
+        let rotate = SKAction.repeatForever(SKAction.rotate(byAngle: .pi * 2, duration: 1.2))
+        let brighten = SKAction.fadeAlpha(to: 0.55, duration: 0.6)
+        let thicken = SKAction.customAction(withDuration: 0.6) { node, t in
+            if let s = node as? SKShapeNode { s.lineWidth = 3 + 4 * (t / 0.6) }
+        }
+        ring.run(SKAction.group([rotate, brighten, thicken]))
+
+        // pulsierender innerer Kern
+        let core = SKShapeNode(circleOfRadius: 10)
+        core.fillColor = .white
+        core.strokeColor = .clear
+        core.alpha = 0.0
+        core.zPosition = -1
+        echoLayer.addChild(core)
+        let corePulse = SKAction.repeatForever(SKAction.sequence([
+            SKAction.fadeAlpha(to: 0.35, duration: 0.4),
+            SKAction.fadeAlpha(to: 0.1, duration: 0.4)
+        ]))
+        core.run(corePulse, withKey: "corePulse")
+        core.name = "echoCore"
+    }
+
+    private func stopEchoCharge() {
+        if let ring = chargeNode {
+            ring.removeAllActions()
+            let fade = SKAction.fadeOut(withDuration: 0.2)
+            ring.run(SKAction.sequence([fade, .removeFromParent()]))
+            chargeNode = nil
+        }
+        if let core = echoLayer.childNode(withName: "echoCore") {
+            core.removeAllActions()
+            core.run(SKAction.sequence([
+                SKAction.fadeOut(withDuration: 0.15), .removeFromParent()
+            ]))
         }
     }
 
+    private func spawnEchoWave() {
+        // Mehrteilig: mehrere Arc-Segmente rotieren und ziehen nach innen
+        let baseR = min(visionRadius, 180)
+        let arcCount = Int.random(in: 3...4)
+        let baseAngle = CGFloat.random(in: 0..<(2 * .pi))
+        for i in 0..<arcCount {
+            let span = CGFloat.random(in: .pi/6 ... .pi/3) // 30°–60°
+            let start = baseAngle + CGFloat(i) * (2 * .pi / CGFloat(arcCount))
+            let end = start + span
+            let path = makeArcPath(radius: baseR, startAngle: start, endAngle: end)
+
+            let arc = SKShapeNode(path: path)
+            arc.position = .zero
+            arc.strokeColor = SKColor.white
+            arc.fillColor = SKColor.clear
+            arc.lineWidth = 3
+            arc.glowWidth = 4
+            arc.alpha = 0.0
+            arc.zPosition = 4
+            echoLayer.addChild(arc)
+
+            // Animation: auftauchen, nach innen skalieren, rotieren und ausblenden
+            let appear = SKAction.fadeAlpha(to: 0.7, duration: 0.06)
+            let inward = SKAction.scale(to: 0.35, duration: 0.28)
+            inward.timingMode = SKActionTimingMode.easeIn
+            let spin = SKAction.rotate(byAngle: CGFloat.random(in: -1.2...1.2), duration: 0.28)
+            let fade = SKAction.fadeOut(withDuration: 0.2)
+
+            let delay = SKAction.wait(forDuration: TimeInterval(0.02 * Double(i)))
+            arc.run(SKAction.sequence([
+                delay,
+                appear,
+                SKAction.group([inward, spin, SKAction.sequence([SKAction.wait(forDuration: 0.12), fade])]),
+                .removeFromParent()
+            ]))
+        }
+
+        // kleiner Kern-Ping zur Mitte
+        let ping = SKShapeNode(circleOfRadius: 8)
+        ping.position = .zero
+        ping.fillColor = SKColor.white
+        ping.strokeColor = SKColor.clear
+        ping.alpha = 0.0
+        ping.zPosition = 6
+        echoLayer.addChild(ping)
+        let grow = SKAction.scale(to: 1.8, duration: 0.18)
+        grow.timingMode = SKActionTimingMode.easeOut
+        ping.run(SKAction.sequence([
+            SKAction.fadeAlpha(to: 0.6, duration: 0.06),
+            SKAction.group([grow, SKAction.fadeOut(withDuration: 0.18)]),
+            .removeFromParent()
+        ]))
+    }
+
+    private func spawnEndFlash() {
+        // Epischer Finish-Blast im Overlay: elliptischer Shock + Shards + Halo
+        let center = self.convert(arrow.position, from: worldNode)
+        let r = visionRadius
+
+        // Elliptischer Shockwave-Ring
+        let ring = SKShapeNode(circleOfRadius: max(r * 0.85, 36))
+        ring.position = center
+        ring.fillColor = SKColor.clear
+        ring.strokeColor = SKColor.white
+        ring.lineWidth = 5
+        ring.glowWidth = 10
+        ring.alpha = 0.9
+        ring.zPosition = 20
+        overlayLayer.addChild(ring)
+
+        let sx: CGFloat = CGFloat.random(in: 1.5...2.1)
+        let sy: CGFloat = CGFloat.random(in: 0.6...0.9)
+        ring.xScale = 0.9
+        ring.yScale = 0.9
+        let scaleX = SKAction.scaleX(to: sx, duration: 0.16)
+        let scaleY = SKAction.scaleY(to: sy, duration: 0.16)
+        let fade = SKAction.fadeOut(withDuration: 0.16)
+        let spin = SKAction.rotate(byAngle: CGFloat.random(in: -0.5...0.5), duration: 0.16)
+        let group = SKAction.group([scaleX, scaleY, fade, spin])
+        ring.run(SKAction.sequence([group, .removeFromParent()]))
+
+        // Shards (Dreiecke) die nach außen fliegen und rotieren
+        let shardCount = 12
+        for _ in 0..<shardCount {
+            let tri = SKShapeNode(path: makeTrianglePath(size: CGFloat.random(in: 8...14)))
+            tri.position = center
+            tri.fillColor = SKColor.white
+            tri.strokeColor = SKColor.clear
+            tri.alpha = 0.95
+            tri.zPosition = 22
+            overlayLayer.addChild(tri)
+
+            let ang = CGFloat.random(in: 0..<(2 * .pi))
+            let dist = CGFloat.random(in: r * 0.25 ... r * 0.6)
+            let dx = cos(ang) * dist
+            let dy = sin(ang) * dist
+            let move = SKAction.moveBy(x: dx, y: dy, duration: 0.28)
+            move.timingMode = SKActionTimingMode.easeOut
+            let rot = SKAction.rotate(byAngle: CGFloat.random(in: -2.5...2.5), duration: 0.28)
+            let fadeShard = SKAction.fadeOut(withDuration: 0.28)
+            tri.run(SKAction.sequence([SKAction.group([move, rot, fadeShard]), .removeFromParent()]))
+        }
+
+        // Leucht-Halo
+        let halo = SKShapeNode(circleOfRadius: r * 1.1)
+        halo.position = center
+        halo.fillColor = SKColor.clear
+        halo.strokeColor = SKColor.white
+        halo.glowWidth = 18
+        halo.lineWidth = 2
+        halo.alpha = 0.25
+        halo.zPosition = 18
+        overlayLayer.addChild(halo)
+        halo.run(SKAction.sequence([
+            SKAction.group([
+                SKAction.fadeOut(withDuration: 0.25),
+                SKAction.scale(to: 1.25, duration: 0.25)
+            ]),
+            .removeFromParent()
+        ]))
+    }
+
+    // MARK: - Path helpers
+    private func makeArcPath(radius: CGFloat, startAngle: CGFloat, endAngle: CGFloat) -> CGPath {
+        let p = CGMutablePath()
+        p.addArc(center: CGPoint.zero, radius: radius, startAngle: startAngle, endAngle: endAngle, clockwise: false)
+        return p
+    }
+
+    private func makeTrianglePath(size: CGFloat) -> CGPath {
+        let p = CGMutablePath()
+        p.move(to: CGPoint(x: 0, y: size))
+        p.addLine(to: CGPoint(x: -size * 0.6, y: -size * 0.6))
+        p.addLine(to: CGPoint(x: size * 0.6, y: -size * 0.6))
+        p.closeSubpath()
+        return p
+    }
+
+    // MARK: - Epic overlay effects (helpers)
+    private var visionRadius: CGFloat {
+        if let p = maskNode.path { return p.boundingBox.width * 0.5 }
+        return 180
+    }
+
+    private func ejectChargeBurst() {
+        // Zentrum im Szenen-Koordinatensystem
+        let center = self.convert(arrow.position, from: worldNode)
+        let r = visionRadius
+
+        // Weißer Expand-Ring, der über den Sichtkreis hinaus schießt
+        let ring = SKShapeNode(circleOfRadius: max(r * 0.92, 40))
+        ring.position = center
+        ring.fillColor = SKColor.clear
+        ring.strokeColor = SKColor.white
+        ring.lineWidth = 6
+        ring.alpha = 0.6
+        ring.glowWidth = 8
+        ring.zPosition = 10
+        overlayLayer.addChild(ring)
+
+        let expand = SKAction.scale(to: 1.65, duration: 0.38)
+        expand.timingMode = SKActionTimingMode.easeOut
+        let fade = SKAction.fadeOut(withDuration: 0.38)
+        let spin = SKAction.rotate(byAngle: .pi * 0.6, duration: 0.38)
+        ring.run(SKAction.sequence([SKAction.group([expand, fade, spin]), .removeFromParent()]))
+
+        // Radiale Outburst-Partikel (kleine Kreise, die nach außen fliegen)
+        let count = 18
+        for _ in 0..<count {
+            let dotR: CGFloat = CGFloat.random(in: 2.0...3.2)
+            let dot = SKShapeNode(circleOfRadius: dotR)
+            dot.position = point(onCircleWithRadius: r * 1.0 + CGFloat.random(in: -6...6), around: center)
+            dot.fillColor = SKColor.white
+            dot.strokeColor = SKColor.clear
+            dot.alpha = 0.9
+            dot.zPosition = 12
+            overlayLayer.addChild(dot)
+
+            let angle = CGFloat.random(in: 0..<(2 * .pi))
+            let dist = CGFloat.random(in: r * 0.2 ... r * 0.6)
+            let dx = cos(angle) * dist
+            let dy = sin(angle) * dist
+            let move = SKAction.moveBy(x: dx, y: dy, duration: 0.4)
+            move.timingMode = SKActionTimingMode.easeOut
+            let fadeDot = SKAction.fadeOut(withDuration: 0.4)
+            dot.run(SKAction.sequence([SKAction.group([move, fadeDot]), SKAction.removeFromParent()]))
+        }
+
+        // Kurzer Screen‑Flash für mehr Wucht
+        spawnScreenFlash(intensity: 0.18, duration: 0.18)
+    }
+
+    private func spawnIncomingOrbs(count: Int) {
+        let center = self.convert(arrow.position, from: worldNode)
+        let r = visionRadius
+        for _ in 0..<count {
+            let angle = CGFloat.random(in: 0..<(2 * .pi))
+            let startDist = r + CGFloat.random(in: 30...160)
+            let endDist = CGFloat.random(in: r * 0.2 ... r * 0.75)
+            let start = CGPoint(x: center.x + cos(angle) * startDist,
+                                y: center.y + sin(angle) * startDist)
+            let end = CGPoint(x: center.x + cos(angle) * endDist,
+                              y: center.y + sin(angle) * endDist)
+
+            let orbR: CGFloat = CGFloat.random(in: 2.0...3.4)
+            let orb = SKShapeNode(circleOfRadius: orbR)
+            orb.position = start
+            orb.fillColor = SKColor.white
+            orb.strokeColor = SKColor.clear
+            orb.alpha = 0.0
+            orb.zPosition = 8
+            overlayLayer.addChild(orb)
+
+            let dur = TimeInterval(CGFloat.random(in: 0.38...0.85))
+            let move = SKAction.move(to: end, duration: dur)
+            move.timingMode = SKActionTimingMode.easeIn
+            let fadeIn = SKAction.fadeAlpha(to: 0.65, duration: dur * 0.4)
+            let fadeOut = SKAction.fadeOut(withDuration: dur * 0.6)
+            orb.run(SKAction.sequence([SKAction.group([move, SKAction.sequence([fadeIn, fadeOut])]), SKAction.removeFromParent()]))
+        }
+    }
+
+    private func spawnScreenFlash(intensity: CGFloat, duration: TimeInterval) {
+        guard let view = self.view else { return }
+        let size = CGSize(width: view.bounds.width * cam.xScale, height: view.bounds.height * cam.yScale)
+        let rect = SKShapeNode(rectOf: size)
+        rect.position = cam.position
+        rect.fillColor = SKColor.white
+        rect.strokeColor = SKColor.clear
+        rect.alpha = intensity
+        rect.zPosition = 100
+        overlayLayer.addChild(rect)
+        rect.run(SKAction.sequence([SKAction.fadeOut(withDuration: duration), SKAction.removeFromParent()]))
+    }
+
+    private func point(onCircleWithRadius radius: CGFloat, around center: CGPoint) -> CGPoint {
+        let angle = CGFloat.random(in: 0..<(2 * .pi))
+        return CGPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
+    }
 }
 
 // MARK: - Hilfs-Extension
@@ -660,3 +1052,116 @@ struct GameView: View {
         }
     }
 }
+
+// Re-add missing helpers inside class scope
+extension SwipeScene {
+    // Ambient dust inside crop
+    fileprivate func setupAmbientDust() {
+        let spawn = SKAction.run { [weak self] in
+            guard let self = self else { return }
+            let count = Int.random(in: 1...2)
+            for _ in 0..<count { self.spawnDustDot() }
+        }
+        let wait = SKAction.wait(forDuration: 0.35, withRange: 0.2)
+        effectsLayer.run(SKAction.repeatForever(SKAction.sequence([spawn, wait])))
+    }
+
+    fileprivate func spawnDustDot() {
+        let radius: CGFloat = CGFloat.random(in: 1.5...2.8)
+        let dot = SKShapeNode(circleOfRadius: radius)
+        let maxR: CGFloat = 140
+        let a = CGFloat.random(in: 0..<(2 * .pi))
+        let r = sqrt(CGFloat.random(in: 0...1)) * maxR
+        let pos = CGPoint(x: arrow.position.x + cos(a) * r, y: arrow.position.y + sin(a) * r)
+        dot.position = pos
+        dot.fillColor = .white.withAlphaComponent(0.12)
+        dot.strokeColor = .clear
+        dot.zPosition = 1
+        effectsLayer.addChild(dot)
+        let drift = CGVector(dx: CGFloat.random(in: -8...8), dy: CGFloat.random(in: 6...16))
+        let move = SKAction.move(by: drift, duration: 1.6)
+        let fade = SKAction.fadeOut(withDuration: 1.6)
+        dot.run(SKAction.sequence([SKAction.group([move, fade]), SKAction.removeFromParent()]))
+    }
+
+    // Arrow ghost trail
+    fileprivate func spawnArrowGhost(at position: CGPoint, angle: CGFloat) {
+        guard let path = arrow.path else { return }
+        let ghost = SKShapeNode(path: path)
+        ghost.position = position
+        ghost.zRotation = angle
+        ghost.fillColor = arrow.fillColor.withAlphaComponent(0.28)
+        ghost.strokeColor = .clear
+        ghost.zPosition = arrow.zPosition - 1
+        worldNode.addChild(ghost)
+        let fade = SKAction.fadeOut(withDuration: 0.25)
+        let scale = SKAction.scale(to: 0.96, duration: 0.25)
+        ghost.run(SKAction.sequence([SKAction.group([fade, scale]), SKAction.removeFromParent()]))
+    }
+
+    // Tap ripple inside crop
+    fileprivate func spawnRipple(at p: CGPoint) {
+        let ripple = SKShapeNode(circleOfRadius: 6)
+        ripple.position = p
+        ripple.fillColor = .clear
+        ripple.strokeColor = .white
+        ripple.lineWidth = 2
+        ripple.alpha = 0.35
+        ripple.zPosition = 950
+        effectsLayer.addChild(ripple)
+        let grow = SKAction.scale(to: 4.0, duration: 0.35)
+        let fade = SKAction.fadeOut(withDuration: 0.35)
+        ripple.run(SKAction.sequence([SKAction.group([grow, fade]), SKAction.removeFromParent()]))
+    }
+
+    // Subtle world shake
+    fileprivate func cameraShake(intensity: CGFloat, duration: TimeInterval) {
+        let dx = intensity, dy = intensity
+        let left = SKAction.moveBy(x: -dx, y: 0, duration: duration * 0.2)
+        let up = SKAction.moveBy(x: 0, y: dy, duration: duration * 0.2)
+        let right = SKAction.moveBy(x: dx, y: 0, duration: duration * 0.2)
+        let down = SKAction.moveBy(x: 0, y: -dy, duration: duration * 0.2)
+        let back = SKAction.moveTo(x: 0, duration: duration * 0.2)
+        let backY = SKAction.moveTo(y: 0, duration: duration * 0.2)
+        worldNode.run(SKAction.sequence([left, up, right, down, SKAction.group([back, backY])]))
+    }
+
+    // Sparkles at events
+    fileprivate func spawnSparkles(at p: CGPoint) {
+        let n = 10
+        for _ in 0..<n {
+            let r: CGFloat = CGFloat.random(in: 1.8...3.0)
+            let s = SKShapeNode(circleOfRadius: r)
+            s.position = p
+            s.fillColor = .yellow
+            s.strokeColor = .white
+            s.lineWidth = 0.5
+            s.alpha = 0.9
+            s.zPosition = 200
+            worldNode.addChild(s)
+            let angle = CGFloat.random(in: 0..<(2 * .pi))
+            let dist = CGFloat.random(in: 20...60)
+            let dx = cos(angle) * dist
+            let dy = sin(angle) * dist
+            let move = SKAction.moveBy(x: dx, y: dy, duration: 0.35)
+            move.timingMode = .easeOut
+            let fade = SKAction.fadeOut(withDuration: 0.35)
+            s.run(SKAction.sequence([SKAction.group([move, fade]), SKAction.removeFromParent()]))
+        }
+    }
+
+    // Haptic+VFX on key pickup
+    fileprivate func keyPickupFeedback() {
+        guard haptics != nil else { return }
+        Task { @MainActor in
+            hapticImpact(duration: 0.08, intensity: 1.0, sharpness: 0.9)
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            hapticImpact(duration: 0.05, intensity: 0.7, sharpness: 0.5)
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            hapticImpact(duration: 0.05, intensity: 0.6, sharpness: 0.4)
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            hapticImpact(duration: 0.1, intensity: 0.3, sharpness: 0.2)
+        }
+    }
+}
+

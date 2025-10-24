@@ -11,7 +11,7 @@ final class GameSettings: ObservableObject {
     @Published var isDebugMode: Bool
 
     // Designated initializer kept internal; prefer using `shared`
-    init(isSoundEnabled: Bool = true, isHapticsEnabled: Bool = true, isDebugMode: Bool? = true) {
+    init(isSoundEnabled: Bool = true, isHapticsEnabled: Bool = true, isDebugMode: Bool? = false) {
         self.isSoundEnabled = isSoundEnabled
         self.isHapticsEnabled = isHapticsEnabled
         #if DEBUG
