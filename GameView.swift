@@ -609,6 +609,9 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         }()
 
         if canMove(from: playerRC.r, playerRC.c, dir: dir) {
+            // tiny movement haptic
+            hapticImpact(duration: 0.2, intensity: 0.15, sharpness: 0.2)
+            
             let (nr, nc) = nextCell(from: playerRC.r, playerRC.c, dir: dir)
             playerRC = (nr, nc)
             let target = centerOfCell(nr, nc)

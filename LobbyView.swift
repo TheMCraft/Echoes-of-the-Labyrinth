@@ -9,7 +9,7 @@ import SwiftUI
 import SpriteKit
 
 struct LobbyView: View {
-    @State private var showGame = false
+    @State private var inGame = false
     @State private var showSettings = false
     @State private var animateStart = false
     @State private var revealProgress: CGFloat = 0.0
@@ -18,6 +18,31 @@ struct LobbyView: View {
     private let buttonSize: CGFloat = 42
 
     var body: some View {
+        ZStack {
+            if !inGame {
+                lobbyContent
+                    .transition(.identity)
+            } else {
+                GameView()
+                    .ignoresSafeArea()
+                    .transition(.identity)
+            }
+
+            // Circular Reveal Overlay
+            if transitioning {
+                Color.black
+                    .mask(
+                        Circle()
+                            .scale(revealProgress)
+                            .frame(width: UIScreen.main.bounds.height * 2)
+                    )
+                    .ignoresSafeArea()
+                    .transition(.identity)
+            }
+        }
+    }
+
+    private var lobbyContent: some View {
         ZStack {
             // Hintergrund
             SpriteView(scene: LobbyBackgroundScene(size: UIScreen.main.bounds.size))
@@ -64,30 +89,13 @@ struct LobbyView: View {
                 }
                 Spacer()
             }
-
-            // Transition Layer (Circular Reveal)
-            if transitioning {
-                Color.black
-                    .mask(
-                        Circle()
-                            .scale(revealProgress)
-                            .frame(width: UIScreen.main.bounds.height * 2)
-                            .offset(x: 0, y: 0)
-                    )
-                    .ignoresSafeArea()
-                    .transition(.identity)
-            }
         }
         .onAppear {
-            // Playback Category: ignoriert den Stumm-Schalter, damit Button-Sound hörbar ist
             SoundManager.shared.setupAudioSession(usePlaybackCategory: true)
             animateStart = true
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
-        }
-        .fullScreenCover(isPresented: $showGame) {
-            GameView()
         }
     }
 
@@ -100,10 +108,16 @@ struct LobbyView: View {
             revealProgress = 3.0
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.68) {
-            showGame = true
-            transitioning = false
-            revealProgress = 0.0
+        // WICHTIG: zuerst Game aktivieren, dann Overlay abbauen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.70) {
+            inGame = true     // → Lobby verschwindet komplett, Game nimmt die Fläche ein
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                withAnimation(.easeOut(duration: 0.30)) {
+                    transitioning = false
+                    revealProgress = 0.0
+                }
+            }
         }
     }
 }
