@@ -93,6 +93,7 @@ struct LobbyView: View {
         .onAppear {
             SoundManager.shared.setupAudioSession(usePlaybackCategory: true)
             animateStart = true
+            SoundManager.shared.playLoop("lobby-music", ext: "mp3", volume: 0.6)
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
@@ -100,17 +101,17 @@ struct LobbyView: View {
     }
 
     private func startGameTransition() {
+        SoundManager.shared.stop() // Lobby-Musik aus
         SoundManager.shared.play("level-selected")
-
+        
         transitioning = true
 
         withAnimation(.easeInOut(duration: 0.70)) {
             revealProgress = 3.0
         }
 
-        // WICHTIG: zuerst Game aktivieren, dann Overlay abbauen
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.70) {
-            inGame = true     // → Lobby verschwindet komplett, Game nimmt die Fläche ein
+            inGame = true
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 withAnimation(.easeOut(duration: 0.30)) {
@@ -118,6 +119,7 @@ struct LobbyView: View {
                     revealProgress = 0.0
                 }
             }
+            SoundManager.shared.playLoop("game-music", ext: "mp3", volume: 0.3)
         }
     }
 }

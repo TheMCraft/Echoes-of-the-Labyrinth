@@ -16,7 +16,7 @@ struct SettingsView: View {
         NavigationView {
             Form {
                 Section("Gameplay") {
-                    Toggle("Debug Mode (zeigt Wände beim Anstoßen)", isOn: $debugMode)
+                    Toggle("Debug Mode (zeigt Wände immer)", isOn: $debugMode)
                 }
                 Section("Audio") {
                     Toggle("Sound aktiv", isOn: $soundEnabled)
