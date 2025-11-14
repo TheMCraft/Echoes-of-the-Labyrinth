@@ -1383,6 +1383,7 @@ extension SwipeScene {
             hapticImpact(duration: 0.05, intensity: 0.6, sharpness: 0.4)
             try? await Task.sleep(nanoseconds: 150_000_000)
             hapticImpact(duration: 0.1, intensity: 0.3, sharpness: 0.2)
+            SoundManager.shared.play("level-finished")
         }
     }
 }
