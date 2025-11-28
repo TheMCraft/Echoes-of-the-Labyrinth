@@ -1,10 +1,3 @@
-//
-//  LobbyView.swift
-//  EotL
-//
-//  Created by Michael Hammer on 07/11/2025.
-//
-
 import SwiftUI
 import SpriteKit
 
@@ -23,9 +16,18 @@ struct LobbyView: View {
                 lobbyContent
                     .transition(.identity)
             } else {
-                GameView()
-                    .ignoresSafeArea()
-                    .transition(.identity)
+                GameView(onExit: {
+                    // zurück zur Lobby
+                    inGame = false
+                    transitioning = false
+                    revealProgress = 0.0
+                    GameSettings.shared.isInGame = false
+                    // Musikwechsel
+                    SoundManager.shared.stop()
+                    SoundManager.shared.playLoop("lobby-music", ext: "mp3", volume: 0.6)
+                })
+                .ignoresSafeArea()
+                .transition(.identity)
             }
 
             // Circular Reveal Overlay
@@ -50,7 +52,7 @@ struct LobbyView: View {
 
             // Logo
             VStack {
-                Text("MAZE")
+                Text("EotL")
                     .font(.system(size: 68, weight: .heavy, design: .rounded))
                     .foregroundColor(.white)
                     .shadow(color: .white.opacity(0.4), radius: 24)
@@ -82,16 +84,18 @@ struct LobbyView: View {
                     Spacer()
                     Button(action: { showSettings = true }) {
                         Image(systemName: "gearshape.fill")
-                            .font(.system(size: 28))
+                            .font(.system(size: 32))
                             .foregroundColor(.white)
-                            .padding(22)
+                            .padding(24)
                     }
                 }
+                .padding(.top, 28) // weiter unter Statusleiste
                 Spacer()
             }
         }
         .onAppear {
             SoundManager.shared.setupAudioSession(usePlaybackCategory: true)
+            GameSettings.shared.isInGame = false // wir sind in der Lobby
             animateStart = true
             SoundManager.shared.playLoop("lobby-music", ext: "mp3", volume: 0.6)
         }
@@ -112,6 +116,7 @@ struct LobbyView: View {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.70) {
             inGame = true
+            GameSettings.shared.isInGame = true // jetzt im Spiel
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 withAnimation(.easeOut(duration: 0.30)) {

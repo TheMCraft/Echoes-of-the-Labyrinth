@@ -1251,6 +1251,10 @@ struct GameView: View {
     }()
     
     @State private var userHasKey = false
+    @State private var showSettings = false
+
+    // Optionaler Callback, um zur Lobby zurückzukehren
+    var onExit: (() -> Void)? = nil
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1263,6 +1267,7 @@ struct GameView: View {
                     }
                 }
 
+            // Schlüssel‑HUD (wenn vorhanden)
             if userHasKey {
                 Image(systemName: "key.fill")
                     .font(.system(size: 32))
@@ -1270,7 +1275,31 @@ struct GameView: View {
                     .padding(20)
                     .shadow(radius: 3)
                     .transition(.scale)
+                    .padding(.top, 56)
             }
+        }
+        // Legt einen sicheren Top‑Inset mit dem Settings‑Button an (unterhalb der Statusleiste)
+        .safeAreaInset(edge: .top) {
+            HStack {
+                Spacer()
+                Button(action: { showSettings = true }) {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 30, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(16)
+                        .background(Color.black.opacity(0.25))
+                        .clipShape(Circle())
+                }
+                .padding(.trailing, 16)
+            }
+            .padding(.top, 28)
+        }
+        // Entferne fälschliche Lobby-Animation/Musik in GameView
+        .sheet(isPresented: $showSettings) {
+            SettingsView(onGiveUp: {
+                SoundManager.shared.stop()
+                onExit?()
+            })
         }
     }
 }
