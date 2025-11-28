@@ -8,7 +8,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
 
     // MARK: Nodes & World
     private let worldNode = SKNode()
-    private let arrow = SKShapeNode()
+    private let arrow = SKSpriteNode(imageNamed: "player")
     private var cam: SKCameraNode!
 
     // Background outside vision
@@ -492,9 +492,9 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
     // MARK: - Arrow
     private func setupArrowAtStart() {
         playerRC = (0, 0)
-        arrow.path = arrowPath(size: 60)
-        arrow.fillColor = .systemPink
-        arrow.strokeColor = .clear
+        // Configure player sprite size relative to cell size
+        let s = max(28, min(cellSize * 0.6, 72))
+        arrow.size = CGSize(width: s, height: s)
         arrow.zPosition = 10
         arrow.position = centerOfCell(playerRC.r, playerRC.c)
         worldNode.addChild(arrow)
@@ -1306,15 +1306,15 @@ extension SwipeScene {
         dot.run(SKAction.sequence([SKAction.group([move, fade]), SKAction.removeFromParent()]))
     }
 
-    // Arrow ghost trail
+    // Arrow ghost trail (now uses the player sprite texture)
     fileprivate func spawnArrowGhost(at position: CGPoint, angle: CGFloat) {
-        guard let path = arrow.path else { return }
-        let ghost = SKShapeNode(path: path)
+        guard let texture = arrow.texture else { return }
+        let ghost = SKSpriteNode(texture: texture)
+        ghost.size = arrow.size
         ghost.position = position
         ghost.zRotation = angle
-        ghost.fillColor = arrow.fillColor.withAlphaComponent(0.28)
-        ghost.strokeColor = .clear
         ghost.zPosition = arrow.zPosition - 1
+        ghost.alpha = 0.28
         worldNode.addChild(ghost)
         let fade = SKAction.fadeOut(withDuration: 0.25)
         let scale = SKAction.scale(to: 0.96, duration: 0.25)
