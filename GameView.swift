@@ -55,6 +55,8 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
 
     // Speichere Outline-Knoten
     private var wallOutlines: [SKShapeNode] = []
+    // Keep wall sprite references in parallel with outlines so we can show them briefly
+    private var wallSprites: [SKSpriteNode] = []
 
     // Haptics & Input
     private var haptics: CHHapticEngine?
@@ -439,15 +441,31 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         grid[rows-1][cols-1].top = false
 
         func addWall(center: CGPoint, size: CGSize) {
-            let wall = SKNode()
-            wall.position = center
-            wall.physicsBody = SKPhysicsBody(rectangleOf: size)
-            wall.physicsBody?.isDynamic = false
-            wall.physicsBody?.categoryBitMask = 0x1 << 2
-            wall.physicsBody?.collisionBitMask = 0
-            worldNode.addChild(wall)
+            // Use the same texture as the floor, but keep original texture colors (no tinting)
+            let tex = SKTexture(imageNamed: "wall")
+            let wallSprite = SKSpriteNode(texture: tex)
+            wallSprite.size = size
+            wallSprite.position = center
+            wallSprite.zPosition = 40
 
-            // Outline für visuelles Feedback
+            // Ensure texture is displayed at normal brightness (no blending/tinting)
+            wallSprite.color = .white
+            wallSprite.colorBlendFactor = 0.0
+            //            wallSprite.alpha = 1.0
+            // Walls are invisible by default. They will be briefly shown when the player bumps into them.
+            wallSprite.alpha = 0.0
+            wallSprite.isHidden = true
+
+            // Physics body lives on the sprite so collisions behave the same as before
+            wallSprite.physicsBody = SKPhysicsBody(rectangleOf: size)
+            wallSprite.physicsBody?.isDynamic = false
+            wallSprite.physicsBody?.categoryBitMask = 0x1 << 2
+            wallSprite.physicsBody?.collisionBitMask = 0
+
+            worldNode.addChild(wallSprite)
+            wallSprites.append(wallSprite)
+
+            // Outline für visuelles Feedback (debug)
             let outline = SKShapeNode(rectOf: size)
             outline.position = center
             outline.strokeColor = .yellow
@@ -628,17 +646,47 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             ])
             arrow.run(SKAction.group([move, pulse]))
         } else {
+            // Show the nearby wall briefly (visual feedback)
             if !GameSettings.shared.isDebugMode {
                 showNearbyWalls(dir)
             }
-            hapticImpact()
-            cameraShake(intensity: 6, duration: 0.12)
-            let bump = SKAction.sequence([
+
+            // Lunge toward the wall then a stronger recoil back to simulate bouncing off
+            hapticImpact(duration: 0.06, intensity: 0.9, sharpness: 0.9)
+
+            // Determine lunge vector based on angle; clamp to reasonable distance
+            let lungeDistance = min(max(cellSize * 0.28, 18), 44)
+            let lungeDX = cos(angle) * lungeDistance
+            let lungeDY = sin(angle) * lungeDistance
+
+            // Forward quick lunge
+            let lunge = SKAction.moveBy(x: lungeDX, y: lungeDY, duration: 0.08)
+            lunge.timingMode = .easeIn
+
+            // Recoil: stronger and slightly overshooting backward
+            let recoil = SKAction.moveBy(x: -lungeDX * 1.6, y: -lungeDY * 1.6, duration: 0.28)
+            recoil.timingMode = .easeOut
+
+            // Small squash/stretch for impact
+            let squash = SKAction.sequence([
                 SKAction.scale(to: 0.92, duration: 0.06),
+                SKAction.scale(to: 1.05, duration: 0.12),
                 SKAction.scale(to: 1.0, duration: 0.08)
             ])
-            let rotate = SKAction.rotate(toAngle: angle, duration: 0.08, shortestUnitArc: true)
-            arrow.run(SKAction.group([bump, rotate]))
+
+            // Rotate to face wall quickly
+            let rotate = SKAction.rotate(toAngle: angle, duration: 0.06, shortestUnitArc: true)
+
+            // Combine: lunge then recoil + squash; keep rotation active
+            arrow.removeAllActions()
+            arrow.run(SKAction.sequence([
+                SKAction.group([rotate, lunge, SKAction.scale(to: 1.02, duration: 0.08)]),
+                SKAction.group([recoil, squash])
+            ]))
+
+            // Camera shake and light haptics on impact
+            cameraShake(intensity: 10, duration: 0.28)
+            hapticImpact(duration: 0.12, intensity: 0.6, sharpness: 0.6)
         }
         if keyDistanceInCells() == 0 {
             userHasKey = true
@@ -667,22 +715,37 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             wallPos.x -= cellSize / 2
         }
 
-        for outline in wallOutlines {
+        // Find matching wall(s) by position and briefly show the wall sprite instead of flashing the outline
+        for (idx, outline) in wallOutlines.enumerated() {
             if outline.position.distance(to: wallPos) < cellSize * 0.3 {
-                outline.isHidden = false
-                // kurzer Flash
-                let oldColor = outline.strokeColor
-                outline.strokeColor = .white
-                outline.glowWidth = 4
-                outline.run(SKAction.sequence([
-                    SKAction.wait(forDuration: 0.12),
-                    SKAction.run {
-                        outline.strokeColor = oldColor
-                        outline.glowWidth = 0
-                    },
-                    SKAction.wait(forDuration: 0.38),
-                    SKAction.run { outline.isHidden = true }
-                ]))
+                // If there is a corresponding wall sprite, animate it visible for a short moment
+                if idx < wallSprites.count {
+                    let sprite = wallSprites[idx]
+                    sprite.removeAllActions()
+                    sprite.isHidden = false
+                    sprite.alpha = 0.0
+                    SoundManager.shared.play("wall-hit")
+                    let appear = SKAction.fadeAlpha(to: 1.0, duration: 0.06)
+                    let wait = SKAction.wait(forDuration: 0.12)
+                    let disappear = SKAction.fadeOut(withDuration: 0.18)
+                    let hide = SKAction.run { sprite.isHidden = true }
+                    sprite.run(SKAction.sequence([appear, wait, disappear, hide]))
+                } else {
+                    // Fallback: briefly show the outline if no sprite exists (shouldn't normally happen)
+                    outline.isHidden = false
+                    let oldColor = outline.strokeColor
+                    outline.strokeColor = .white
+                    outline.glowWidth = 4
+                    outline.run(SKAction.sequence([
+                        SKAction.wait(forDuration: 0.12),
+                        SKAction.run {
+                            outline.strokeColor = oldColor
+                            outline.glowWidth = 0
+                        },
+                        SKAction.wait(forDuration: 0.38),
+                        SKAction.run { outline.isHidden = true }
+                    ]))
+                }
             }
         }
     }
