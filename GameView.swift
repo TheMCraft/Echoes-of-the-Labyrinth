@@ -437,8 +437,8 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
 
         carveMaze(from: (r: 0, c: 0))
 
-        grid[0][0].bottom = false
-        grid[rows-1][cols-1].top = false
+        // Keep all outer walls present (do not force open entrance/exit)
+        // (Do not override perimeter wall flags here.)
 
         func addWall(center: CGPoint, size: CGSize) {
             // Use the same texture as the floor, but keep original texture colors (no tinting)
@@ -679,9 +679,20 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
 
             // Combine: lunge then recoil + squash; keep rotation active
             arrow.removeAllActions()
+            // remember original rotation and current center so we can restore exactly
+            let originalRotation = arrow.zRotation
+            let cellCenter = centerOfCell(playerRC.r, playerRC.c)
+
+            // after recoil, snap back precisely to the cell center and restore rotation
+            let restorePos = SKAction.move(to: cellCenter, duration: 0.06)
+            restorePos.timingMode = .easeInEaseOut
+            let restoreRot = SKAction.rotate(toAngle: originalRotation, duration: 0.08, shortestUnitArc: true)
+            let restoreScale = SKAction.scale(to: 1.0, duration: 0.06)
+
             arrow.run(SKAction.sequence([
                 SKAction.group([rotate, lunge, SKAction.scale(to: 1.02, duration: 0.08)]),
-                SKAction.group([recoil, squash])
+                SKAction.group([recoil, squash]),
+                SKAction.group([restorePos, restoreRot, restoreScale])
             ]))
 
             // Camera shake and light haptics on impact
@@ -1153,7 +1164,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
             let dx = cos(ang) * dist
             let dy = sin(ang) * dist
             let move = SKAction.moveBy(x: dx, y: dy, duration: 0.28)
-            move.timingMode = SKActionTimingMode.easeOut
+            move.timingMode = .easeOut
             let rot = SKAction.rotate(byAngle: CGFloat.random(in: -2.5...2.5), duration: 0.28)
             let fadeShard = SKAction.fadeOut(withDuration: 0.28)
             tri.run(SKAction.sequence([SKAction.group([move, rot, fadeShard]), .removeFromParent()]))
