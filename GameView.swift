@@ -982,6 +982,7 @@ final class SwipeScene: SKScene, @MainActor SKPhysicsContactDelegate {
         for i in 0..<count {
             try? Task.checkCancellation()
             print("Index \(i)")
+            SoundManager.shared.play("echo-wave")
             hapticImpact(duration: 0.1, intensity: 0.6, sharpness: 0.6)
             spawnEchoWave()
             try? await Task.sleep(nanoseconds: UInt64(currentDelay))
